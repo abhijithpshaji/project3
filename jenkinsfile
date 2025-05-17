@@ -1,0 +1,125 @@
+pipeline {
+    agent any
+
+    environment {
+        ECR_REPO     = '985539775450.dkr.ecr.ap-south-1.amazonaws.com/node-app'
+        IMAGE_TAG    = "${BUILD_NUMBER}"
+        IMAGE_URI    = "${ECR_REPO}:${IMAGE_TAG}"
+        AWS_REGION   = 'ap-south-1'
+    }
+
+    stages {
+
+        // Stage to checkout the repository from GitHub
+        stage('Checkout Repository') {
+            steps {
+                git url: 'https://github.com/abhijithpshaji/project3.git',
+                    branch: 'main',
+                    credentialsId: 'github-token'
+                sh 'ls -l'  // List files to verify the repository is checked out
+            }
+        }
+
+        // Install dependencies and run tests
+        stage('Install Dependencies & Run Tests') {
+            steps {
+                script {
+                    // Install npm dependencies
+                    sh 'npm install'
+
+                    // Run tests (optional)
+                    sh 'npm test'
+                }
+            }
+        }
+
+        // Build the Docker image
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    // Build Docker image and tag it with the ECR URI
+                    sh "docker build -t ${IMAGE_URI} ."
+                }
+            }
+        }
+
+        // Login to AWS ECR
+        stage('Login to AWS ECR') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    script {
+                        // Configure AWS CLI with credentials
+                        sh """
+                            aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+                            aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+                            aws configure set default.region ${AWS_REGION}
+
+                            # Login to AWS ECR
+                            aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO}
+                        """
+                    }
+                }
+            }
+        }
+
+        // Push the Docker image to AWS ECR
+        stage('Push Docker Image to ECR') {
+            steps {
+                script {
+                    // Push the Docker image to ECR
+                    sh "docker push ${IMAGE_URI}"
+                }
+            }
+        }
+
+        // Authenticate with AWS EKS
+        stage('Authenticate with EKS') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    script {
+                        // Configure AWS CLI for EKS authentication
+                        sh """
+                            aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+                            aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+                            aws configure set default.region ${AWS_REGION}
+
+                            # Update kubeconfig for EKS authentication
+                            aws eks --region ${AWS_REGION} update-kubeconfig --name project-cluster
+                        """
+                    }
+                }
+            }
+        }
+
+        // Update the Kubernetes rollout YAML with the new image
+        stage('Update Rollout YAML') {
+            steps {
+                script {
+                    // Replace the image in the rollout YAML with the new image URI
+                    sh "sed -i 's|image: .*|image: ${IMAGE_URI}|' k8s/rollout.yaml"
+                }
+            }
+        }
+
+        // Deploy the updated rollout YAML to Kubernetes (EKS)
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    // Apply the updated rollout YAML to the EKS cluster
+                    sh "kubectl apply -f k8s/rollout.yaml"
+                }
+            }
+        }
+    }
+
+    // Post actions after the pipeline execution
+    post {
+        success {
+            echo 'Deployment completed successfully!'
+        }
+        failure {
+            echo 'Deployment failed. Please check the logs for details.'
+        }
+    }
+}
+
